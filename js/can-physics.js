@@ -1,4 +1,4 @@
-// Can physics and interaction variables
+// Realistic can physics variables
 let can;
 let isCarryingCan = false;
 const canOriginalPosition = new THREE.Vector3();
@@ -9,47 +9,56 @@ const canPickupDistance = 2.0;
 const canDropTolerance = 1.5;
 const playerDropDistanceMax = 2.0;
 
-// Can physics constants - ADJUSTED FOR LIGHTER EMPTY CAN
-const CAN_FRICTION = 0.85; // Less friction for easier sliding
-const CAN_RESTITUTION = 0.5; // More bouncy since it's light
-const CAN_AIR_RESISTANCE = 0.95; // More affected by air
+// REALISTIC CAN PHYSICS CONSTANTS FOR EMPTY CAN
+const CAN_MASS = 0.05; // ~50 grams for empty can (much lighter)
+const CAN_FRICTION = 0.3; // Less friction on hard surfaces
+const CAN_ROLLING_FRICTION = 0.05; // Special friction for rolling
+const CAN_RESTITUTION = 0.4; // Less bouncy than before (more realistic)
+const CAN_AIR_RESISTANCE = 0.995; // Air affects light objects more
+const CAN_ANGULAR_DAMPING = 0.98; // Rotation slows down naturally
+
+// Realistic physical properties
+const CAN_RADIUS = 0.15;
+const CAN_HEIGHT = 0.4;
+const CAN_INERTIA = 0.5 * CAN_MASS * CAN_RADIUS * CAN_RADIUS; // Moment of inertia for cylinder
 
 // Player collision radius
 const playerRadius = 0.30;
 const canCollisionRadius = 0.20;
 
-// Function to create a custom canvas texture for a worn tomato can
+// Advanced physics state
+let canContactPoints = [];
+let canSurfaceVelocity = new THREE.Vector3();
+let canPreviousPosition = new THREE.Vector3();
+let canPreviousRotation = new THREE.Vector3();
+
 function createTomatoCanTexture() {
     const canvas = document.createElement('canvas');
     canvas.width = 128;
-    canvas.height = 256; // Taller for cylinder mapping
+    canvas.height = 256;
     const context = canvas.getContext('2d');
     
-    // 1. Base colors: Faded red and cream/white for a label look
-    context.fillStyle = '#C25D5D'; // Faded tomato red
+    context.fillStyle = '#C25D5D';
     context.fillRect(0, 0, 128, 256);
     
-    context.fillStyle = '#F0EAD6'; // Cream/faded white center band
+    context.fillStyle = '#F0EAD6';
     context.fillRect(20, 50, 88, 156);
 
-    // 2. Add "TOMATOES" text (faded black/dark red)
     context.fillStyle = '#333333';
     context.font = 'bold 30px Arial';
     context.textAlign = 'center';
     context.fillText('TOMATOES', 64, 110);
     
-    // 3. Add rust and grime patches
     for (let i = 0; i < 150; i++) {
         const x = Math.random() * 128;
         const y = Math.random() * 256;
         const size = Math.random() * 5 + 1;
-        const rustColor = Math.random() < 0.5 ? '#8B4513' : '#6E4A35'; // Brown/darker brown
+        const rustColor = Math.random() < 0.5 ? '#8B4513' : '#6E4A35';
         context.fillStyle = rustColor;
-        context.globalAlpha = Math.random() * 0.5 + 0.3; // Make it semi-transparent
+        context.globalAlpha = Math.random() * 0.5 + 0.3;
         context.fillRect(x, y, size, size);
     }
     
-    // 4. Add deep scratches (dark lines)
     context.globalAlpha = 1.0;
     context.strokeStyle = '#444444';
     context.lineWidth = 1;
@@ -67,168 +76,252 @@ function createTomatoCanTexture() {
 }
 
 function createCan(x, z) {
-    const canRadius = 0.15;
-    const canHeight = 0.4;
-    
     const canGroup = new THREE.Group();
     canGroup.name = "InteractableCan";
     
-    // Add physics properties to the can group - LIGHTER WEIGHT FOR EMPTY CAN
+    // REALISTIC PHYSICS PROPERTIES
     canGroup.userData = {
         velocity: new THREE.Vector3(),
         angularVelocity: new THREE.Vector3(),
         onGround: true,
-        mass: 0.3, // Much lighter since it's empty (was 1.0)
-        radius: canRadius,
-        height: canHeight,
-        isTipped: false
+        mass: CAN_MASS,
+        radius: CAN_RADIUS,
+        height: CAN_HEIGHT,
+        inertia: CAN_INERTIA,
+        isTipped: false,
+        isRolling: false,
+        contactNormal: new THREE.Vector3(0, 1, 0),
+        surfaceMaterial: 'grass', // Can have different friction per surface
+        lastImpactTime: 0,
+        impactForce: new THREE.Vector3()
     };
     
-    // 1. Main body with custom worn tomato label texture
-    const bodyGeometry = new THREE.CylinderGeometry(canRadius, canRadius, canHeight, 32);
+    // Main body
+    const bodyGeometry = new THREE.CylinderGeometry(CAN_RADIUS, CAN_RADIUS, CAN_HEIGHT, 32);
     const tomatoTexture = createTomatoCanTexture();
     const bodyMaterial = new THREE.MeshLambertMaterial({ 
         map: tomatoTexture,
-        color: 0xffffff // Use white so the texture color shows fully
+        color: 0xffffff
     }); 
     const canBody = new THREE.Mesh(bodyGeometry, bodyMaterial);
     canBody.name = "CanMesh";
     canGroup.add(canBody);
     
-    // 2. Top and bottom caps (worn, empty metal look)
-    const metalColor = 0xAAAAAA; // Gray/silver
-    const capGeometry = new THREE.CylinderGeometry(canRadius, canRadius, 0.02, 32);
+    // Top and bottom caps
+    const metalColor = 0xAAAAAA;
+    const capGeometry = new THREE.CylinderGeometry(CAN_RADIUS, CAN_RADIUS, 0.02, 32);
     const capMaterial = new THREE.MeshLambertMaterial({ 
         color: metalColor, 
-        flatShading: true // Gives it a slightly cheaper, stamped metal look
+        flatShading: true
     }); 
     
     // Opened/Empty Rim
-    const rimGeometry = new THREE.TorusGeometry(canRadius * 0.9, 0.005, 8, 32);
+    const rimGeometry = new THREE.TorusGeometry(CAN_RADIUS * 0.9, 0.005, 8, 32);
     const rimMaterial = new THREE.MeshLambertMaterial({ color: 0x555555 });
     const rim = new THREE.Mesh(rimGeometry, rimMaterial);
     rim.rotation.x = Math.PI / 2;
-    rim.position.y = canHeight / 2 + 0.01;
+    rim.position.y = CAN_HEIGHT / 2 + 0.01;
     canGroup.add(rim);
 
     const bottomCap = new THREE.Mesh(capGeometry, capMaterial);
-    bottomCap.position.y = -canHeight / 2;
+    bottomCap.position.y = -CAN_HEIGHT / 2;
     canGroup.add(bottomCap);
 
-    // More dramatic initial tilt to show it's unstable
-    canGroup.rotation.z = Math.random() * 0.2 - 0.1; // Increased random tilt
-    canGroup.rotation.x = Math.random() * 0.2 - 0.1; // Increased random tilt
+    // Realistic initial tilt - empty cans are unstable
+    canGroup.rotation.z = (Math.random() - 0.5) * 0.3;
+    canGroup.rotation.x = (Math.random() - 0.5) * 0.3;
 
-    // Position the entire can group on the ground
-    canGroup.position.set(x, canHeight / 2, z);
+    canGroup.position.set(x, CAN_HEIGHT / 2, z);
     scene.add(canGroup);
+    
+    // Initialize previous position for velocity calculation
+    canPreviousPosition.copy(canGroup.position);
+    canPreviousRotation.copy(canGroup.rotation);
     
     return canGroup;
 }
 
-function applyForceToCan(force) {
-    // Apply force to can's velocity - multiplied by inverse mass for lighter object
-    const forceMultiplier = 1 / can.userData.mass; // Lighter = more responsive to force
-    can.userData.velocity.add(force.multiplyScalar(forceMultiplier));
+function applyForceToCan(force, applicationPoint = null) {
+    // Apply linear force
+    const forceMultiplier = 1 / can.userData.mass;
+    can.userData.velocity.add(force.multiplyScalar(forceMultiplier * 0.02)); // Scale for frame rate
     
-    // More dramatic angular velocity for lightweight can
-    can.userData.angularVelocity.set(
-        (Math.random() - 0.5) * 1.0, // Increased spinning
-        (Math.random() - 0.5) * 1.0, // Increased spinning  
-        (Math.random() - 0.5) * 1.0  // Increased spinning
-    );
+    // Apply torque if force is applied at a point
+    if (applicationPoint) {
+        const leverArm = new THREE.Vector3().subVectors(applicationPoint, can.position);
+        const torque = new THREE.Vector3().crossVectors(leverArm, force);
+        const angularAcceleration = torque.multiplyScalar(1 / can.userData.inertia);
+        can.userData.angularVelocity.add(angularAcceleration.multiplyScalar(0.02));
+    }
+}
+
+function applyTorque(torque) {
+    const angularAcceleration = torque.multiplyScalar(1 / can.userData.inertia);
+    can.userData.angularVelocity.add(angularAcceleration.multiplyScalar(0.02));
 }
 
 function checkIfCanIsTipped() {
-    // Check if the can is tipped over (angle greater than 45 degrees)
     const tipThreshold = Math.PI / 4; // 45 degrees
     const currentTilt = Math.max(
         Math.abs(can.rotation.x),
         Math.abs(can.rotation.z)
     );
     
+    const wasTipped = can.userData.isTipped;
     can.userData.isTipped = currentTilt > tipThreshold;
+    
+    // If just tipped over, add some random rotation
+    if (can.userData.isTipped && !wasTipped) {
+        can.userData.angularVelocity.x += (Math.random() - 0.5) * 2;
+        can.userData.angularVelocity.z += (Math.random() - 0.5) * 2;
+    }
+    
     return can.userData.isTipped;
+}
+
+function checkIfCanIsRolling() {
+    if (!can.userData.onGround || can.userData.isTipped) {
+        can.userData.isRolling = false;
+        return false;
+    }
+    
+    // Can is rolling if it has significant angular velocity and is upright
+    const angularSpeed = can.userData.angularVelocity.length();
+    const linearSpeed = can.userData.velocity.length();
+    can.userData.isRolling = angularSpeed > 0.5 && linearSpeed > 0.1 && !can.userData.isTipped;
+    
+    return can.userData.isRolling;
+}
+
+function calculateSurfaceVelocity() {
+    // Calculate velocity at the contact point due to rotation
+    const angularVelocity = can.userData.angularVelocity;
+    const radiusVector = new THREE.Vector3(0, -CAN_RADIUS, 0);
+    canSurfaceVelocity.crossVectors(angularVelocity, radiusVector);
 }
 
 function updateCanPhysics() {
     if (isCarryingCan) return;
     
-    // Apply gravity - less effect on lightweight can
-    can.userData.velocity.y += GRAVITY * 0.02 * 0.5; // Reduced gravity effect
+    const deltaTime = 0.016; // Approximate 60fps
+    
+    // Store previous state for calculations
+    canPreviousPosition.copy(can.position);
+    canPreviousRotation.copy(can.rotation);
+    
+    // Apply gravity (scaled by mass)
+    can.userData.velocity.y += GRAVITY * deltaTime * (CAN_MASS / 0.05);
+    
+    // Apply air resistance (more effect on light objects)
+    can.userData.velocity.multiplyScalar(CAN_AIR_RESISTANCE);
     
     // Update position
-    can.position.add(can.userData.velocity.clone().multiplyScalar(0.02));
+    can.position.add(can.userData.velocity.clone().multiplyScalar(deltaTime));
     
-    // Update rotation - faster rotation for lightweight can
-    can.rotation.x += can.userData.angularVelocity.x * 0.03;
-    can.rotation.y += can.userData.angularVelocity.y * 0.03;
-    can.rotation.z += can.userData.angularVelocity.z * 0.03;
+    // Calculate surface velocity for rolling physics
+    calculateSurfaceVelocity();
     
-    // Check if can is tipped over
+    // Update rotation with proper angular damping
+    can.rotation.x += can.userData.angularVelocity.x * deltaTime;
+    can.rotation.y += can.userData.angularVelocity.y * deltaTime;
+    can.rotation.z += can.userData.angularVelocity.z * deltaTime;
+    
+    // Apply angular damping
+    can.userData.angularVelocity.multiplyScalar(CAN_ANGULAR_DAMPING);
+    
+    // Check physical states
     const isTipped = checkIfCanIsTipped();
+    const isRolling = checkIfCanIsRolling();
     
-    // Ground collision
+    // GROUND COLLISION with realistic response
     if (can.position.y <= canOriginalPosition.y) {
         can.position.y = canOriginalPosition.y;
         
-        // Bounce effect when hitting ground - more bouncy for lightweight can
+        // Realistic ground impact
         if (can.userData.velocity.y < 0) {
+            const impactStrength = Math.abs(can.userData.velocity.y);
+            
+            // Bounce with energy loss
             can.userData.velocity.y = -can.userData.velocity.y * CAN_RESTITUTION;
             
-            // Add random tilt when hitting ground (empty cans tip easily)
-            if (Math.abs(can.userData.velocity.y) > 0.5) {
-                can.rotation.x += (Math.random() - 0.5) * 0.3;
-                can.rotation.z += (Math.random() - 0.5) * 0.3;
+            // Sound-like effect through visual feedback
+            if (impactStrength > 0.5) {
+                // Add random rotation on impact
+                can.userData.angularVelocity.x += (Math.random() - 0.5) * impactStrength * 2;
+                can.userData.angularVelocity.z += (Math.random() - 0.5) * impactStrength * 2;
+                
+                // Small bounce for light object
+                can.userData.velocity.y += impactStrength * 0.3;
             }
+            
+            can.userData.lastImpactTime = Date.now();
+            can.userData.impactForce.set(0, impactStrength, 0);
         }
         
-        // Less friction when on ground for easier sliding
-        can.userData.velocity.x *= CAN_FRICTION;
-        can.userData.velocity.z *= CAN_FRICTION;
-        
-        // Slower rotation damping when tipped (harder to stop rolling)
-        if (isTipped) {
-            can.userData.angularVelocity.multiplyScalar(0.98);
+        // GROUND FRICTION - different behavior based on state
+        if (isRolling) {
+            // Rolling friction is much lower
+            can.userData.velocity.x *= (1 - CAN_ROLLING_FRICTION);
+            can.userData.velocity.z *= (1 - CAN_ROLLING_FRICTION);
+            
+            // Sync angular velocity with linear velocity for realistic rolling
+            const groundSpeed = Math.sqrt(can.userData.velocity.x * can.userData.velocity.x + 
+                                        can.userData.velocity.z * can.userData.velocity.z);
+            const targetAngularSpeed = groundSpeed / CAN_RADIUS;
+            
+            // Smoothly approach the correct rolling angular velocity
+            const currentAngularSpeed = can.userData.angularVelocity.length();
+            if (groundSpeed > 0.1) {
+                const adjustment = targetAngularSpeed - currentAngularSpeed;
+                can.userData.angularVelocity.y += adjustment * 0.1;
+            }
         } else {
-            can.userData.angularVelocity.multiplyScalar(CAN_FRICTION);
+            // Sliding friction
+            can.userData.velocity.x *= (1 - CAN_FRICTION);
+            can.userData.velocity.z *= (1 - CAN_FRICTION);
         }
         
         can.userData.onGround = true;
     } else {
-        // More air resistance when in air (light objects are affected more by air)
-        can.userData.velocity.multiplyScalar(CAN_AIR_RESISTANCE);
-        can.userData.angularVelocity.multiplyScalar(CAN_AIR_RESISTANCE);
+        can.userData.onGround = false;
     }
     
-    // Wall collisions - more bounce for lightweight can
+    // WALL COLLISIONS with realistic response
     const halfWidth = gridWidth / 2 - canCollisionRadius;
     const halfDepth = gridDepth / 2 - canCollisionRadius;
     
     if (can.position.x > halfWidth) {
         can.position.x = halfWidth;
-        can.userData.velocity.x = -can.userData.velocity.x * CAN_RESTITUTION;
+        can.userData.velocity.x = -can.userData.velocity.x * CAN_RESTITUTION * 0.8;
         // Add spin when hitting walls
-        can.userData.angularVelocity.z += can.userData.velocity.x * 0.5;
+        can.userData.angularVelocity.z += can.userData.velocity.x * 0.8;
     } else if (can.position.x < -halfWidth) {
         can.position.x = -halfWidth;
-        can.userData.velocity.x = -can.userData.velocity.x * CAN_RESTITUTION;
-        can.userData.angularVelocity.z += can.userData.velocity.x * 0.5;
+        can.userData.velocity.x = -can.userData.velocity.x * CAN_RESTITUTION * 0.8;
+        can.userData.angularVelocity.z += can.userData.velocity.x * 0.8;
     }
     
     if (can.position.z > halfDepth) {
         can.position.z = halfDepth;
-        can.userData.velocity.z = -can.userData.velocity.z * CAN_RESTITUTION;
-        can.userData.angularVelocity.x += can.userData.velocity.z * 0.5;
+        can.userData.velocity.z = -can.userData.velocity.z * CAN_RESTITUTION * 0.8;
+        can.userData.angularVelocity.x += can.userData.velocity.z * 0.8;
     } else if (can.position.z < -halfDepth) {
         can.position.z = -halfDepth;
-        can.userData.velocity.z = -can.userData.velocity.z * CAN_RESTITUTION;
-        can.userData.angularVelocity.x += can.userData.velocity.z * 0.5;
+        can.userData.velocity.z = -can.userData.velocity.z * CAN_RESTITUTION * 0.8;
+        can.userData.angularVelocity.x += can.userData.velocity.z * 0.8;
     }
     
-    // Gradually reduce velocities - less damping for lightweight object
-    can.userData.velocity.multiplyScalar(0.96);
-    can.userData.angularVelocity.multiplyScalar(0.97);
+    // STABILITY - empty cans tend to fall over
+    if (!isTipped && can.userData.onGround) {
+        // Add slight instability - empty cans wobble
+        const wobbleStrength = 0.02;
+        can.userData.angularVelocity.x += (Math.random() - 0.5) * wobbleStrength;
+        can.userData.angularVelocity.z += (Math.random() - 0.5) * wobbleStrength;
+    }
+    
+    // ENERGY DISSIPATION
+    can.userData.velocity.multiplyScalar(0.998);
+    can.userData.angularVelocity.multiplyScalar(0.995);
 }
 
 function handleCanCollision() {
@@ -243,37 +336,38 @@ function handleCanCollision() {
         const currentDistance = playerXZ.distanceTo(canXZ);
 
         if (currentDistance < collisionDistance) {
-            // Calculate collision normal and overlap
+            // REALISTIC COLLISION RESPONSE
             const overlap = collisionDistance - currentDistance;
             const collisionNormal = playerXZ.clone().sub(canXZ).normalize();
             
-            // Move player away from can (less resistance since can is light)
-            player.position.x += collisionNormal.x * overlap * 0.5;
-            player.position.z += collisionNormal.y * overlap * 0.5;
+            // Move player away from can
+            player.position.x += collisionNormal.x * overlap * 0.7;
+            player.position.z += collisionNormal.y * overlap * 0.7;
             
-            // Apply force to the can based on player movement - MORE force since can is lighter
+            // Apply force to can based on player movement
             if (intendedMovement.length() > 0) {
-                // Calculate force based on player's movement direction and speed
                 const playerSpeed = intendedMovement.length();
-                const forceMagnitude = playerSpeed * 15; // Increased force for lighter can
+                const forceMagnitude = playerSpeed * 25; // Realistic force scaling
                 
-                // Apply force in the opposite direction of collision normal
                 const force = new THREE.Vector3(
                     -collisionNormal.x * forceMagnitude,
-                    0,
+                    0.5, // Small upward force
                     -collisionNormal.y * forceMagnitude
                 );
                 
-                applyForceToCan(force);
+                // Apply force at the collision point for realistic rotation
+                const collisionPoint = new THREE.Vector3(
+                    canPosition.x + collisionNormal.x * CAN_RADIUS,
+                    canPosition.y,
+                    canPosition.z + collisionNormal.y * CAN_RADIUS
+                );
                 
-                // More upward force when walking into can (light cans jump more)
+                applyForceToCan(force, collisionPoint);
+                
+                // Light objects get knocked around more
                 if (playerSpeed > 0.01) {
-                    can.userData.velocity.y += 0.8 * playerSpeed;
+                    can.userData.velocity.y += 1.2 * playerSpeed;
                     can.userData.onGround = false;
-                    
-                    // Add more dramatic tipping
-                    can.rotation.x += (Math.random() - 0.5) * 0.4;
-                    can.rotation.z += (Math.random() - 0.5) * 0.4;
                 }
             }
         }
@@ -289,12 +383,17 @@ function handleContinuousCanInteraction() {
         can.getWorldPosition(canPosition);
         
         const playerToCanDistance = player.position.distanceTo(canPosition);
-        const pushThreshold = playerRadius + canCollisionRadius + 0.15; // Increased range
+        const pushThreshold = playerRadius + canCollisionRadius + 0.1;
         
-        // If player is very close to can and moving, apply continuous force
+        // Continuous gentle pushing when very close
         if (playerToCanDistance < pushThreshold && intendedMovement.length() > 0) {
-            // Stronger continuous force for lighter can
-            const pushForce = intendedMovement.clone().multiplyScalar(0.8);
+            const pushDirection = new THREE.Vector3(
+                canPosition.x - player.position.x,
+                0,
+                canPosition.z - player.position.z
+            ).normalize();
+            
+            const pushForce = intendedMovement.clone().multiplyScalar(0.3);
             applyForceToCan(pushForce);
         }
     }
@@ -306,36 +405,28 @@ function pickUpCan() {
     const raycaster = createAimRaycaster();
     const playerPosition = player.position.clone();
 
-    // Get the can's world position
     const canPosition = new THREE.Vector3();
     can.getWorldPosition(canPosition);
     
-    // Check 1: Is player close enough to the can?
     const playerToCanDistance = playerPosition.distanceTo(canPosition);
     const isPlayerCloseEnough = playerToCanDistance <= canPickupDistance;
     
-    // Check 2: Is crosshair pointing at the can?
     const canIntersects = raycaster.intersectObject(can, true);
 
     if (canIntersects.length > 0 && isPlayerCloseEnough) {
-        // Pick up the can successfully
         isCarryingCan = true;
         
-        // Remove the can from the scene
         scene.remove(can);
-
-        // Parent the can to the right arm pivot
         rightArmPivot.add(can);
 
-        // Position the can on the hand
         can.position.copy(canHoldingOffset);
         
-        // Reset can physics when picked up
+        // Reset physics when picked up
         can.userData.velocity.set(0, 0, 0);
         can.userData.angularVelocity.set(0, 0, 0);
         can.userData.isTipped = false;
+        can.userData.isRolling = false;
         
-        // Align the can with the hand rotation
         can.rotation.set(0, 0, 0);
         return true;
     }
@@ -354,19 +445,16 @@ function placeCan() {
     if (groundIntersects.length > 0) {
         const intersectionPoint = groundIntersects[0].point;
         
-        // Check 1: Is player close enough to target area?
         const playerPosXZ = new THREE.Vector2(playerPosition.x, playerPosition.z);
         const targetPosXZ = new THREE.Vector2(targetDropPosition.x, targetDropPosition.z);
         const playerDistanceToTarget = playerPosXZ.distanceTo(targetPosXZ);
         const isPlayerCloseEnough = playerDistanceToTarget <= playerDropDistanceMax;
 
-        // Check 2: Is crosshair aiming at target area?
         const dropPosXZ = new THREE.Vector2(intersectionPoint.x, intersectionPoint.z);
         const aimDistance = dropPosXZ.distanceTo(targetPosXZ);
         const isAimingAtTarget = aimDistance <= canDropTolerance;
 
         if (isAimingAtTarget && isPlayerCloseEnough) {
-            // Place the can successfully
             isCarryingCan = false;
             
             rightArmPivot.remove(can);
@@ -375,12 +463,17 @@ function placeCan() {
             can.position.copy(intersectionPoint);
             can.position.y = canOriginalPosition.y;
             
-            // More dramatic random rotation when placing (empty cans tip easily)
-            can.rotation.set(
-                Math.random() * 0.3 - 0.15, // Increased rotation range
-                Math.random() * Math.PI * 2, 
-                Math.random() * 0.3 - 0.15  // Increased rotation range
-            );
+            // Realistic placement - empty cans often tip when dropped
+            const tipChance = 0.6; // 60% chance to tip when placed
+            if (Math.random() < tipChance) {
+                can.rotation.set(
+                    (Math.random() - 0.5) * 0.5,
+                    Math.random() * Math.PI * 2, 
+                    (Math.random() - 0.5) * 0.5
+                );
+            } else {
+                can.rotation.set(0, Math.random() * Math.PI * 2, 0);
+            }
             return true;
         }
     }
@@ -484,48 +577,63 @@ function getCanPhysicsStatus() {
     
     const canSpeed = can.userData.velocity.length();
     const isTipped = checkIfCanIsTipped();
+    const isRolling = checkIfCanIsRolling();
     
     if (isTipped) {
         return {
             status: 'tipped',
             message: 'TIPPED OVER!',
             speed: canSpeed,
-            tipped: true
+            tipped: true,
+            rolling: false
+        };
+    } else if (isRolling) {
+        return {
+            status: 'rolling',
+            message: `Rolling (${canSpeed.toFixed(1)} m/s)`,
+            speed: canSpeed,
+            tipped: false,
+            rolling: true
         };
     } else if (canSpeed > 0.15) {
         return {
-            status: 'rollingFast',
-            message: `Rolling Fast! (${canSpeed.toFixed(1)} m/s)`,
+            status: 'slidingFast',
+            message: `Sliding Fast! (${canSpeed.toFixed(1)} m/s)`,
             speed: canSpeed,
-            tipped: false
+            tipped: false,
+            rolling: false
         };
     } else if (canSpeed > 0.05) {
         return {
-            status: 'rolling',
-            message: `Rolling... (${canSpeed.toFixed(1)} m/s)`,
+            status: 'sliding',
+            message: `Sliding... (${canSpeed.toFixed(1)} m/s)`,
             speed: canSpeed,
-            tipped: false
+            tipped: false,
+            rolling: false
         };
     } else if (!can.userData.onGround) {
         return {
             status: 'inAir',
             message: 'In Air',
             speed: canSpeed,
-            tipped: false
+            tipped: false,
+            rolling: false
         };
     } else if (canSpeed > 0.01) {
         return {
-            status: 'sliding',
-            message: 'Sliding...',
+            status: 'moving',
+            message: 'Moving...',
             speed: canSpeed,
-            tipped: false
+            tipped: false,
+            rolling: false
         };
     } else {
         return {
             status: 'stationary',
             message: 'On Ground',
             speed: canSpeed,
-            tipped: false
+            tipped: false,
+            rolling: false
         };
     }
 }
@@ -534,4 +642,21 @@ function getCanPhysicsStatus() {
 function initCan() {
     canOriginalPosition.copy(targetDropPosition);
     can = createCan(targetDropPosition.x, targetDropPosition.z);
+}
+
+// Export advanced physics functions
+function getCanAdvancedState() {
+    return {
+        position: can.position.clone(),
+        rotation: can.rotation.clone(),
+        velocity: can.userData.velocity.clone(),
+        angularVelocity: can.userData.angularVelocity.clone(),
+        mass: can.userData.mass,
+        inertia: can.userData.inertia,
+        isTipped: can.userData.isTipped,
+        isRolling: can.userData.isRolling,
+        onGround: can.userData.onGround,
+        surfaceMaterial: can.userData.surfaceMaterial,
+        lastImpact: can.userData.lastImpactTime
+    };
 }
